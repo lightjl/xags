@@ -303,7 +303,8 @@ def get_growth_stock(context, stock_list):
                 break
         if flag_empty:
             continue
-            
+        
+        
         start_quarterth = 1
         #2014-12-31
         if df_now[df_now.code==i]['statDate'].values[0][6] == '3':
@@ -335,7 +336,28 @@ def get_growth_stock(context, stock_list):
         eps_q = [1]*g.quarterVS
         eps_q_lastyear = [1]*g.quarterVS
         cap_q = [1]*g.quarterVS
+        
+        flag_empty = False
         cap_q_lastyear = [1]*g.quarterVS
+        
+        for j in range(start_yearth, 4+start_yearth):
+            if yearP[j][yearP[j].code==i].empty:
+                flag_empty = True
+                break
+
+            
+        for j in range(g.quarterVS):
+            qThis = quarterP[j+start_quarterth][quarterP[j+start_quarterth].code==i]
+            qThis_n = quarterP[j+start_quarterth+1][quarterP[j+start_quarterth+1].code==i]
+            qThis_lyear = quarterP[j+start_quarterth+4][quarterP[j+start_quarterth+4].code==i]
+            qThis_l_n = quarterP[j+start_quarterth+5][quarterP[j+start_quarterth+5].code==i]
+            if qThis.empty or qThis_n.empty or qThis_lyear.empty or qThis_l_n.empty:
+                flag_empty = True
+                break
+                
+        if flag_empty:
+            continue
+            
         for j in range(g.quarterVS): 
             qThis = quarterP[j+start_quarterth][quarterP[j+start_quarterth].code==i]
             qThis_n = quarterP[j+start_quarterth+1][quarterP[j+start_quarterth+1].code==i]
