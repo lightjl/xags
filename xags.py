@@ -1,11 +1,13 @@
 '''
 每股现金流 用去年年报
+移动止损，没有考虑复权的问题，这是很多网上策略忽略的
 '''
 import pandas as pd
 import time
 from datetime import date
 from datetime import timedelta
 import tradestat
+from sqlalchemy.sql.expression import or_
 '''
 ================================================================================
 总体回测前
@@ -21,7 +23,7 @@ def initialize(context):
         g.trade_stat = tradestat.trade_stat()
     f = 12  # 调仓频率
     g.Transfer_date = range(1,13,12/f)
-    run_monthly(Transfer,20)
+    # run_monthly(Transfer,20)
 
 #1 
 #设置策略参数
@@ -31,11 +33,17 @@ def set_params():
     
     g.per_year = 0.25                            # EPS增长率不低于0.25
     g.per_quarter = 0.25                         # EPS增长率不低于0.25
-    g.flag_stat = False                          # 默认不开启统计
+    g.flag_stat = True                           # 默认不开启统计
     g.trade_skill = False                        # 开启交易策略
     g.yearVS = 4+1                               # 比较3年的EPS，去年年报不一定出
     g.quarterVS = 3                              # 比较3季度的EPS
-
+    
+    g.huiluo = 0.1                               # 最高点回落10%卖出
+    g.zhishun = 0.2                              # 跌破20%卖出
+    g.zhiying = 1                                # 涨了1倍卖出
+    
+    # 缓存股票持仓后的最高价
+    g.last_high = {}
 #2
 #设置中间变量
 def set_variables():
@@ -55,6 +63,8 @@ def set_backtest():
 #每天开盘前要做的事情
 def before_trading_start(context):
     set_slip_fee(context)                 # 设置手续费与手续费
+    g.feasible_stocks = set_feasible_stocks(g.stocks,context)
+    g.feasible_stocks = stocks_can_buy(context)
     # 设置可行股票池
     
 #4
@@ -107,13 +117,14 @@ def set_slip_fee(context):
 每天交易时
 ================================================================================
 '''
-'''
+
 # 每天回测时做的事情
 def handle_data(context,data):
-    # 需买入的股票
-    list_to_buy = pick_buy_list(context, data, g.feasible_stocks)
+    log.debug(g.feasible_stocks)
     # 待卖出的股票，list类型
-    list_to_sell = stocks_to_sell(context, data, list_to_buy)
+    list_to_sell = stocks_to_sell(context, data, g.feasible_stocks)
+    # 需买入的股票
+    list_to_buy = pick_buy_list(context, g.feasible_stocks, list_to_sell)
     # 卖出操作
     sell_operation(context,list_to_sell)
     # 买入操作
@@ -134,7 +145,7 @@ def Transfer(context):
         sell_operation(context,list_to_sell)
         # 买入操作
         buy_operation(context, list_to_buy)
-    
+'''
 #6
 # 计算股票的PEG值
 # 输入：context(见API)；stock_list为list类型，表示股票池
@@ -146,6 +157,7 @@ def get_PEG(context, stock_list):
     # 得到一个dataframe：包含股票代码、市盈率PE、收益增长率G
     # 默认date = context.current_dt的前一天,使用默认值，避免未来函数，不建议修改
     df_PE_G = get_fundamentals(q_PE_G)
+    log.debug(df_PE_G)
     # 筛选出成长股：删除市盈率或收益增长率为负值的股票
     df_Growth_PE_G = df_PE_G[(df_PE_G.pe_ratio >0)&(df_PE_G.inc_operation_profit_year_on_year >0)]
     # 去除PE或G值为非数字的股票所在行
@@ -167,12 +179,31 @@ def get_PEG(context, stock_list):
 # 输出：buy_list_stocks为list: 为股票代码
 def get_growth_stock(context, stock_list): 
     pe_ration_max = 40
+    year = context.current_dt.year
+    month = context.current_dt.month
+    day = context.current_dt.day
+    # context.current_dt.strftime("%Y-%m-%d")
     # 查询股票池里股票的市盈率，收益增长率 indicator.inc_operation_profit_year_on_year
-    q_PE_G = query(valuation.code, valuation.pe_ratio, indicator.inc_operation_profit_year_on_year
-                 ).filter(valuation.code.in_(stock_list)) 
+
+    q_PE_G = query(valuation.code, valuation.pe_ratio, \
+                indicator.inc_operation_profit_year_on_year,\
+                balance.pubDate
+                 ).filter(valuation.code.in_(stock_list) \
+                 , or_(balance.pubDate == (context.current_dt- \
+                        timedelta(1)).strftime("%Y-%m-%d") \
+                        ,balance.pubDate == (context.current_dt- \
+                        timedelta(2)).strftime("%Y-%m-%d") \
+                        , balance.pubDate == (context.current_dt- \
+                        timedelta(3)).strftime("%Y-%m-%d") 
+                       )
+                 )
+
     # 得到一个dataframe：包含股票代码、市盈率PE、收益增长率G
     # 默认date = context.current_dt的前一天,使用默认值，避免未来函数，不建议修改
+    #log.debug(context.current_dt.strftime("%Y-%m-%d"))
     df_PE_G = get_fundamentals(q_PE_G)
+    #print df_PE_G[df_PE_G.pubDate=="2015-10-19"]['pubDate'].values[0]
+    #log.debug(df_PE_G)
     # 筛选出成长股：删除市盈率或收益增长率为负值的股票
     df_Growth_PE_G = df_PE_G[(df_PE_G.pe_ratio>0)&(df_PE_G.pe_ratio<pe_ration_max)&(df_PE_G.inc_operation_profit_year_on_year >20)]
     # 去除PE或G值为非数字的股票所在行
@@ -209,8 +240,6 @@ def get_growth_stock(context, stock_list):
     # 处理过去3年的数据
     # 每股现金流 > eps_year(去年)*1.2
     
-    year = context.current_dt.year
-    month = context.current_dt.month
     # 读取前8个季度报表
     quarterList = [([]) for i in range(9)]
     yearW = year
@@ -230,7 +259,7 @@ def get_growth_stock(context, stock_list):
             yearW -= 1
         quarterList[i] = str(yearW)+'q'+str(quarterLast-i)
         
-    log.debug(quarterList)
+    #log.debug(quarterList)
     
     yearP1 = get_fundamentals(q_PE_G2, statDate=str(year-1))
     yearL = [year-g.yearVS+i for i in range(g.yearVS)]  # 2011 2012 2013 2014 2015 今年2016
@@ -646,14 +675,58 @@ def notBuyThenSell(context, list_to_buy):
         if stock not in list_to_buy:
             list_to_sell.append(stock)
     return list_to_sell
+
+# 个股止损
+def stock_stop_loss(context, data):
+    list_to_sell = []
+    for stock in context.portfolio.positions.keys():
+        cur_price = data[stock].close
+
+        if g.last_high[stock] < cur_price:
+            g.last_high[stock] = cur_price
+
+        if cur_price < g.last_high[stock] * (1 - g.huiluo):
+            log.info("==> 个股止损, stock: %s, cur_price: %f, last_high: %f, huiluo: %f" 
+                %(stock, cur_price, g.last_high[stock], g.huiluo))
+
+            list_to_sell.append(stock)
+            continue
+        position = context.portfolio.positions[stock]
+        if cur_price < position.avg_cost * (1 - g.zhishun):
+            log.info("==> 个股止损, stock: %s, cur_price: %f, 均价: %f, 止损: %f" 
+                %(stock, cur_price, position.avg_cost, g.zhishun))
+            list_to_sell.append(stock)
+            continue
+    return list_to_sell
+
+# 个股止盈
+def stock_stop_profit(context, data):
+    list_to_sell = []
+    for stock in context.portfolio.positions.keys():
+        position = context.portfolio.positions[stock]
+        cur_price = data[stock].close
+        
+        if cur_price > position.avg_cost * (1 + g.zhiying):
+            log.info("==> 个股止盈, stock: %s, cur_price: %f, avg_cost: %f, zhiying: %f" 
+                %(stock, cur_price, g.last_high[stock], g.zhiying))
+            list_to_sell.append(stock)
+            
+    return list_to_sell
 #8
 # 获得卖出信号
 # 输入：context（见API文档）, list_to_buy为list类型，代表待买入的股票
 # 输出：list_to_sell为list类型，表示待卖出的股票
-def stocks_to_sell(context, list_to_buy):
+def stocks_to_sell(context, data, list_to_buy):
     # 对于不需要持仓的股票，全仓卖出
-    list_to_sell = notBuyThenSell(context, list_to_buy)
+    list_to_sell = []
+    # 每交易日只查询3日内报告，所以不合适，不选出来就卖
+    # list_to_sell = notBuyThenSell(context, list_to_buy)
     # list_to_sell = get_clear_stock(context, list_to_buy)
+    list_to_sell = stock_stop_loss(context, data)
+    list_to_sell2 = stock_stop_profit(context, data)
+    for i in list_to_sell2:
+        if i not in list_to_sell:
+            list_to_sell.append(i)
     if g.trade_skill:
         list_to_sell2 = stocks_udma_to_sell(context)
         for i in list_to_sell2:
@@ -672,6 +745,10 @@ def close_position(position):
         if order.filled > 0 and g.flag_stat:
             # 只要有成交，无论全部成交还是部分成交，则统计盈亏
             g.trade_stat.watch(security, order.filled, position.avg_cost, position.price)
+        if order.status == OrderStatus.held and order.filled == order.amount:
+            # 全部成交则删除相关证券的最高价缓存
+            g.last_high.pop(security)
+            return True
     return False
     
     
@@ -708,7 +785,10 @@ def buy_operation(context, list_to_buy):
         # 为每个持仓股票分配资金
         g.capital_unit=context.portfolio.portfolio_value/g.num_stocks
         # 买入在"待买股票列表"的股票
-        order_target_value(stock_buy, g.capital_unit)
+        order = order_target_value(stock_buy, g.capital_unit)
+        if order != None and order.filled > 0:
+            cur_price = context.portfolio.positions[stock_buy].avg_cost
+            g.last_high[stock_buy] = cur_price
 
 '''
 ================================================================================
